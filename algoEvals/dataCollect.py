@@ -9,16 +9,12 @@ import os
 import glob
 import csv
 
-import sys
-sys.path.append('./quantLab')
-
 def getModel(modelName, epoch=None, returnPath=False):
-    import torchvision as tv 
-    import quantlab.ImageNet.topology as topo
-    
+    import torchvision as tv
+
     loss_func =  torch.nn.CrossEntropyLoss()
     model = None
-    
+
     if modelName == 'alexnet':
         model = tv.models.alexnet(pretrained=True)
     elif modelName == 'squeezenet':
@@ -29,21 +25,7 @@ def getModel(modelName, epoch=None, returnPath=False):
         model = tv.models.vgg16_bn(pretrained=True)
     elif modelName == 'mobilenet2':
         model = tv.models.mobilenet_v2(pretrained=True)
-        
-    elif modelName == 'alexnet-cust':
-        path = './quantLab/ImageNet/log/exp00/'
-        model = topo.AlexNetBaseline(capacity=1)
-        if epoch == None: epoch = 54
-        tmp = torch.load(path + '/save/epoch%04d.ckpt' % epoch, map_location=torch.device('cpu'))
-        model.load_state_dict(tmp['net'])
-        
-    elif modelName == 'mobilenetV2-cust':
-        path = './quantLab/ImageNet/log/exp05/'
-        model = topo.MobileNetV2Baseline(capacity=1, expansion=6)
-        if epoch == None: epoch = 200
-        tmp = torch.load(path + '/save/epoch%04d.ckpt' % epoch, map_location=torch.device('cpu'))
-        model.load_state_dict(tmp['net'])
-    
+
     assert(model != None)
     if returnPath:
         return model, loss_func, path
@@ -56,18 +38,18 @@ def getTensorBoardData(path, traceName):
         pathOpts = glob.glob(path + '/events.out.tfevents.*')
         assert(len(pathOpts) == 1)
         path = pathOpts[0]
-    
+
     event_acc = EventAccumulator(path)
     event_acc.Reload()
     # Show all tags in the log file: print(event_acc.Tags())
-    
+
     trace  = event_acc.Scalars(traceName)
     values = [v.value for v in trace]
     steps  = [v.step for v in trace]
     return steps, values
 
 def getFMs(model, loss_func, training=True, numBatches=1, batchSize=10, computeGrads=False, safetyFactor=0.75):
-    
+
     # CREATE DATASET LOADERS
     import quantLab.quantlab.ImageNet.preprocess as pp
     datasetTrain, datasetVal, _ = pp.load_datasets('./ilsvrc12/', augment=False)
@@ -84,22 +66,22 @@ def getFMs(model, loss_func, training=True, numBatches=1, batchSize=10, computeG
     msConv = list(filter(lambda m: type(m) == torch.nn.modules.Conv2d, model.modules()))
     msBN = list(filter(lambda m: type(m) == torch.nn.modules.BatchNorm2d, model.modules()))
 
-    #register hooks to get intermediate outputs: 
+    #register hooks to get intermediate outputs:
     def setupFwdHooks(modules):
       outputs = []
       def hook(module, input, output):
           outputs.append(output.detach().contiguous().clone())
-      for i, m in enumerate(modules): 
+      for i, m in enumerate(modules):
         m.register_forward_hook(hook)
       return outputs
 
-    #register hooks to get gradient maps: 
+    #register hooks to get gradient maps:
     def setupGradHooks(modules):
       grads = []
       def hook(module, gradInput, gradOutput):
           assert(len(gradInput) == 1)
           grads.insert(0, gradInput[0].contiguous().clone())
-      for i, m in enumerate(modules): 
+      for i, m in enumerate(modules):
         m.register_backward_hook(hook)
       return grads
 
@@ -107,16 +89,16 @@ def getFMs(model, loss_func, training=True, numBatches=1, batchSize=10, computeG
     outputsConv = setupFwdHooks(msConv)
     outputsBN   = setupFwdHooks(msBN)
     gradsReLU   = setupGradHooks(msReLU)
-    
+
     # PASS IMAGES THROUGH NETWORK
     outputSetsMaxMulti, gradSetsMaxMulti = [], []
     outputSets, gradSets = [outputsReLU, outputsConv, outputsBN], [gradsReLU]
     dataIterator = iter(dataLoader)
 
     for _ in range(numBatches):
-      for outputs in outputSets: 
+      for outputs in outputSets:
         outputs.clear()
-      for grads in gradSets: 
+      for grads in gradSets:
         grads.clear()
 
       (image, target) = next(dataIterator)
@@ -127,22 +109,22 @@ def getFMs(model, loss_func, training=True, numBatches=1, batchSize=10, computeG
         if computeGrads:
             loss = loss_func(outp, target)
             loss.backward()
-      else: 
+      else:
         model.eval()
         outp = model(image)
 
-      tmp = [[outp.max().item() for outp in outputs] 
+      tmp = [[outp.max().item() for outp in outputs]
              for outputs in outputSets]
       outputSetsMaxMulti.append(tmp)
       if computeGrads:
-          tmp = [[grad.max().item() for grad in grads] 
+          tmp = [[grad.max().item() for grad in grads]
                  for grads in gradSets]
           gradSetsMaxMulti.append(tmp)
 
     outputSetsMax = [np.array([om2[i] for om2 in outputSetsMaxMulti]).max(axis=0) for i in range(len(outputSets))]
     if computeGrads:
         gradSetsMax = [np.array([om2[i] for om2 in gradSetsMaxMulti]).max(axis=0) for i in range(len(gradSets))]
-    
+
     # NORMALIZE
     for outputs, outputsMax in zip(outputSets, outputSetsMax):
       for op, opmax in zip(outputs,outputsMax):
@@ -152,7 +134,7 @@ def getFMs(model, loss_func, training=True, numBatches=1, batchSize=10, computeG
         for grads, gradsMax in zip(gradSets, gradSetsMax):
           for op, opmax in zip(grads,gradsMax):
             op.mul_(safetyFactor/opmax)
-    else: 
+    else:
         gradsReLU = []
-    
+
     return outputsReLU, outputsConv, outputsBN, gradsReLU
